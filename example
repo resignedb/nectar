@@ -1,0 +1,440 @@
+--!nonstrict
+--[=[
+	NECTAR ─ full API demonstration
+	Every control prints its output so you can watch the console and verify
+	each callback fires with the right value.
+
+	SETUP ─ upload Library.lua to pastebin (or any raw host) and paste the RAW
+	link below. A raw pastebin link looks like: https://pastebin.com/raw/AbCdEfGh
+	(The bootstrapper is built into the library now — no second upload needed.)
+]=]
+
+-- ┌──────────────────────────────────────────────────────────────────────┐
+-- │  REPLACE THIS with your raw upload link                               │
+-- └──────────────────────────────────────────────────────────────────────┘
+local LIBRARY_URL = "https://raw.githubusercontent.com/resignedb/nectar/refs/heads/main/library.lua"
+
+local Nectar = loadstring(game:HttpGet(LIBRARY_URL))()
+
+--═══════════════════════════ 1 · Bootstrap (cosmetic, optional) ═══════════
+-- Flip Enabled to false to skip the splash. Everything it shows is set here:
+local BOOTSTRAPPER = {
+	Enabled  = true,                       -- ← simple on/off
+	Title    = "NECTAR",                   -- big title text
+	Subtitle = "Interface Suite",          -- small line under the title
+	Steps    = {                           -- status text + progress-line steps
+		"Connecting",
+		"Fetching components",
+		"Building interface",
+		"Finishing up",
+	},
+	Duration = 3.0,                        -- total seconds
+	FinalText = "Welcome",                 -- shown right before it fades
+	Accent   = Color3.fromRGB(255, 176, 46), -- line + accent colour
+}
+if BOOTSTRAPPER.Enabled then
+	Nectar:Bootstrap(BOOTSTRAPPER)          -- yields until the splash finishes
+end
+
+--═══════════════════════════ 2 · Window / navigation ═════════════════════
+local Window = Nectar:CreateWindow({
+	Title     = "Nectar Showcase",
+	Subtitle  = "v" .. Nectar.Version,
+	Size      = UDim2.fromOffset(660, 460),
+	ToggleKey = Enum.KeyCode.RightShift, -- hide/show the interface
+	-- simple-variable watermark: one line switches it on and picks the stats
+	Watermark = {
+		Enabled  = true,
+		Title    = "NECTAR",
+		Mode     = "watermark",     -- "watermark" | "topbar" | "mixed" | "none"
+		Location = "BottomRight",
+		Info     = "user, executor, ping, fps",
+		Interval = 1,
+	},
+})
+
+local MainTab     = Window:CreateTab({ Name = "Controls",   Icon = "sliders" })
+local InputTab    = Window:CreateTab({ Name = "Inputs",     Icon = "terminal" })
+local DisplayTab  = Window:CreateTab({ Name = "Display",    Icon = "grid" })
+local AddedTab    = Window:CreateTab({ Name = "Added",      Icon = "bolt" })
+local SettingsTab = Window:CreateTab({ Name = "Settings",   Icon = "settings" })
+
+--═══════════════════════════ 3 · Core controls ═══════════════════════════
+local Basics = MainTab:CreateSection("Basics")
+
+Basics:CreateButton({
+	Name = "Run Action",
+	Description = "Buttons ripple and compress on press",
+	Tooltip = "Click me and watch the console",
+	Callback = function()
+		print("[Button] clicked at", os.clock())
+		Nectar:Notify({ Title = "Action ran", Content = "Button callback fired.", Type = "Success", Icon = "bolt" })
+	end,
+})
+
+local MasterToggle = Basics:CreateToggle({
+	Name = "Master Switch",
+	Description = "State is spring-animated and flag-registered",
+	Default = true,
+	Flag = "MasterSwitch",
+	Callback = function(value)
+		print("[Toggle] Master Switch →", value)
+	end,
+})
+
+Basics:CreateSlider({
+	Name = "Walk Speed",
+	Min = 16, Max = 200, Step = 2, Default = 16, Suffix = " sps",
+	Flag = "WalkSpeed",
+	Callback = function(value)
+		print("[Slider] Walk Speed →", value)
+	end,
+})
+
+Basics:CreateRangeSlider({
+	Name = "Spawn Window",
+	Min = 0, Max = 60, DefaultMin = 10, DefaultMax = 45, Step = 5,
+	Callback = function(lo, hi)
+		print("[RangeSlider] window →", lo, "to", hi)
+	end,
+})
+
+local Choices = MainTab:CreateSection("Choices")
+
+Choices:CreateDropdown({
+	Name = "Execution Mode",
+	Values = { "Safe", "Balanced", "Aggressive" },
+	Default = "Balanced",
+	Flag = "ExecMode",
+	Callback = function(value)
+		print("[Dropdown] mode →", value)
+	end,
+})
+
+Choices:CreateDropdown({
+	Name = "Enabled Modules",
+	Values = { "ESP", "Aimlock", "Speed", "Fly", "Noclip", "Xray" },
+	Multi = true, Searchable = true,
+	Default = { "ESP" },
+	Callback = function(list)
+		print("[MultiDropdown] modules → {" .. table.concat(list, ", ") .. "}")
+	end,
+})
+
+Choices:CreateColorPicker({
+	Name = "Highlight Color",
+	Default = Color3.fromRGB(255, 176, 46),
+	Flag = "Highlight",
+	Callback = function(color)
+		print(string.format("[ColorPicker] → #%s", color:ToHex():upper()))
+	end,
+})
+
+Choices:CreateKeybind({
+	Name = "Quick Action Key",
+	Default = Enum.KeyCode.F,
+	Flag = "QuickKey",
+	Callback = function(key)
+		print("[Keybind] pressed:", key.Name)
+	end,
+	ChangedCallback = function(key)
+		print("[Keybind] rebound to:", key and key.Name or "unbound")
+	end,
+})
+
+--═══════════════════════════ 4 · Text inputs ═════════════════════════════
+local Text = InputTab:CreateSection("Text Entry")
+
+Text:CreateTextbox({
+	Name = "Player Name",
+	Placeholder = "type a username…",
+	Callback = function(text)
+		print("[Textbox] →", text)
+	end,
+})
+
+Text:CreateNumberInput({
+	Name = "Retry Count",
+	Min = 0, Max = 25, Step = 1, Default = 3,
+	Callback = function(n)
+		print("[NumberInput] →", n)
+	end,
+})
+
+--═══════════════════════════ 5 · Display components ══════════════════════
+local Passive = DisplayTab:CreateSection("Passive")
+
+Passive:CreateLabel({ Text = "A plain label — supports <b>rich text</b>." })
+Passive:CreateParagraph({
+	Title = "About sections",
+	Content = "Sections are collapsible cards. Click a section header to fold it — the height tweens and the chevron rotates.",
+})
+Passive:CreateDivider({ Text = "live components" })
+
+local Progress = Passive:CreateProgressBar({ Name = "Sync Progress", Default = 0 })
+task.spawn(function() -- animate the bar so you can see :Set working
+	for i = 0, 10 do
+		Progress:Set(i / 10)
+		task.wait(0.4)
+	end
+	print("[ProgressBar] reached 100%")
+end)
+
+Passive:CreateBadge({ Name = "Build Channel", Value = "stable" })
+Passive:CreateSpinner({})
+
+local ConsoleSection = DisplayTab:CreateSection("Log Console")
+local Console = ConsoleSection:CreateConsole({ Height = 130 })
+Console:Log("console online", "ok")
+Console:Log("this is an info line")
+Console:Log("this is a warning", "warn")
+Console:Log("this is an error", "error")
+ConsoleSection:CreateButton({
+	Name = "Clear console",
+	Callback = function()
+		Console:Clear()
+		print("[Console] cleared")
+	end,
+})
+
+--═══════════════════════════ 6 · Notifications ═══════════════════════════
+local Toasts = DisplayTab:CreateSection("Notifications")
+for _, kind in ipairs({ "Info", "Success", "Warning", "Error" }) do
+	Toasts:CreateButton({
+		Name = "Send " .. kind .. " toast",
+		Callback = function()
+			Nectar:Notify({
+				Title = kind .. " notification",
+				Content = "Stacked, animated, auto-dismissing.",
+				Type = kind, Duration = 4,
+			})
+			print("[Notify] sent", kind)
+		end,
+	})
+end
+Toasts:CreateButton({
+	Name = "Send progress toast",
+	Callback = function()
+		local toast = Nectar:Notify({ Title = "Downloading", Content = "Progress-driven toast", Duration = 0 })
+		task.spawn(function()
+			for i = 1, 10 do
+				toast.SetProgress(i / 10)
+				task.wait(0.3)
+			end
+			toast.Dismiss()
+			print("[Notify] progress toast finished")
+		end)
+	end,
+})
+
+--═══════════════════════════ 7 · Themes / config ═════════════════════════
+local Appearance = SettingsTab:CreateSection("Appearance")
+
+Appearance:CreateDropdown({
+	Name = "Theme",
+	Values = { "Dark", "Light", "Amoled" },
+	Default = "Dark",
+	Callback = function(theme)
+		Nectar:SetTheme(theme)
+		print("[Theme] switched to", theme)
+	end,
+})
+
+Appearance:CreateButton({
+	Name = "Register custom theme",
+	Description = "Adds an ocean palette, inherits missing tokens from Dark",
+	Callback = function()
+		Nectar:AddTheme("Ocean", {
+			Accent     = Color3.fromRGB(72, 170, 255),
+			AccentSoft = Color3.fromRGB(24, 44, 66),
+			Backdrop   = Color3.fromRGB(10, 14, 20),
+			Surface    = Color3.fromRGB(15, 20, 28),
+		})
+		Nectar:SetTheme("Ocean")
+		print("[Theme] custom 'Ocean' registered + applied")
+		print("[Theme] export:", Nectar.Theme.Export("Ocean"))
+	end,
+})
+
+local Persistence = SettingsTab:CreateSection("Config")
+-- built-in config manager: name field + Save/Load/Delete + a live list of
+-- found configs (click one to select it). Lists custom names, not just "default".
+Persistence:CreateConfigManager({ Title = "Saved configs", Default = "demo" })
+
+local WindowSection = SettingsTab:CreateSection("Window")
+WindowSection:CreateButton({
+	Name = "Minimize (2s)",
+	Callback = function()
+		Window:SetMinimized(true)
+		task.delay(2, function() Window:SetMinimized(false) end)
+	end,
+})
+WindowSection:CreateKeybind({
+	Name = "UI Toggle Key",
+	Default = Enum.KeyCode.RightShift,
+	ChangedCallback = function(key)
+		if key then
+			Window:SetToggleKey(key)
+			print("[Window] toggle key →", key.Name)
+		end
+	end,
+})
+WindowSection:CreateButton({
+	Name = "Destroy interface",
+	Description = "Full teardown: springs stopped, connections cleaned",
+	Callback = function()
+		print("[Window] destroying…")
+		Window:Destroy()
+	end,
+})
+
+--═══════════════════════════ 8 · Info API + Watermark ════════════════════
+local InfoSection = SettingsTab:CreateSection("Runtime Info")
+InfoSection:CreateButton({
+	Name = "Print runtime info",
+	Description = "Built-in helpers: fps, user, executor, ping, game, region…",
+	Callback = function()
+		print("[Info] user     =", Nectar.Info.GetUsername())
+		print("[Info] display  =", Nectar.Info.GetDisplayName())
+		print("[Info] executor =", Nectar.Info.GetExecutor())
+		print("[Info] fps      =", Nectar.Info.GetFPS())
+		print("[Info] ping     =", Nectar.Info.GetPing())
+		print("[Info] game     =", Nectar.Info.GetGameName())
+		print("[Info] players  =", Nectar.Info.GetPlayerCount())
+		print("[Info] region   =", Nectar.Info.GetServerRegion())
+		print("[Info] playtime =", Nectar.Info.GetPlaytime())
+		print("[Info] clock    =", Nectar.Info.GetClock())
+	end,
+})
+
+local WatermarkSection = SettingsTab:CreateSection("Watermark")
+-- everything below drives the SAME watermark created with the window above,
+-- showing the "give users freedom" style: live, variable-driven control.
+WatermarkSection:CreateToggle({
+	Name = "Show watermark",
+	Default = true,
+	Callback = function(on)
+		local wm = Nectar:GetWatermark()
+		if wm then wm:SetEnabled(on) end
+		print("[Watermark] enabled →", on)
+	end,
+})
+WatermarkSection:CreateDropdown({
+	Name = "Display mode",
+	Values = { "watermark", "topbar", "mixed", "none" },
+	Default = "watermark",
+	Callback = function(mode)
+		local wm = Nectar:GetWatermark()
+		if wm then wm:SetMode(mode) end
+		print("[Watermark] mode →", mode)
+	end,
+})
+WatermarkSection:CreateDropdown({
+	Name = "Corner",
+	Values = { "TopLeft", "TopRight", "BottomLeft", "BottomRight" },
+	Default = "BottomRight",
+	Callback = function(loc)
+		local wm = Nectar:GetWatermark()
+		if wm then wm:SetLocation(loc) end
+		print("[Watermark] location →", loc)
+	end,
+})
+WatermarkSection:CreateDropdown({
+	Name = "Stats shown",
+	Multi = true,
+	Values = { "user", "executor", "ping", "fps", "game", "players", "region", "playtime", "time" },
+	Default = { "user", "executor", "ping", "fps" },
+	Callback = function(selected)
+		local wm = Nectar:GetWatermark()
+		if wm then wm:SetInfo(selected) end
+		print("[Watermark] info →", table.concat(selected, ", "))
+	end,
+})
+
+--═══════════════════════════ 8.5 · ADDED features (Mango build) ════════
+--[[
+	Three additions layered onto Nectar for the Mango port:
+
+	  1. handle:SetDescription(text)  — every Row-based control (Button, Toggle,
+	     Slider, Textbox, NumberInput, Dropdown, Keybind) can now show/refresh a
+	     description line AT RUNTIME, even if it was created without one. Used as
+	     a live data readout under a control.
+	  2. handle:SetTitle(text)       — readable alias for the existing SetName.
+	  3. Section:Clear()             — destroy every control in a section (but
+	     keep the section) so it can be rebuilt on the fly. Also
+	     Section:GetElements() returns the live { Name, Handle } list.
+]]
+local AddedLive = AddedTab:CreateSection("Live description readout")
+
+-- A NumberInput created WITHOUT a Description that grows one live. This is the
+-- exact pattern the Mango "Performance Mods" tab uses to display each
+-- A-Chassis tune value's current in-game number under its input.
+local tuneInput = AddedLive:CreateNumberInput({
+	Name = "Boost PSI", Min = 0, Max = 30, Step = 1, Default = 12,
+	Callback = function(n)
+		print("[Added] Boost PSI →", n)
+	end,
+})
+tuneInput:SetDescription("current: 12")     -- lazily adds the description line
+
+-- A Textbox whose label (title) AND description both update from data.
+local nameInput = AddedLive:CreateTextbox({
+	Name = "Profile Name", Placeholder = "type a name…",
+	Callback = function(text)
+		nameInput:SetTitle(text == "" and "Profile Name" or ("Profile: " .. text)) -- SetTitle alias
+		nameInput:SetDescription(text == "" and nil or ("saved as \"" .. text .. "\""))
+		print("[Added] profile →", text)
+	end,
+})
+
+-- drive the NumberInput's description from its own live value every 0.5s
+task.spawn(function()
+	while task.wait(0.5) do
+		pcall(function()
+			tuneInput:SetDescription("current: " .. tostring(tuneInput:Get()))
+		end)
+	end
+end)
+
+local AddedRebuild = AddedTab:CreateSection("Section:Clear() rebuild")
+AddedRebuild:CreateLabel({ Text = "Press to regenerate the controls below.", Muted = true })
+
+local dynHost = AddedTab:CreateSection("Dynamic controls")
+local rebuildCount = 0
+local function rebuildDynamic()
+	dynHost:Clear()                                   -- wipe old controls cleanly
+	rebuildCount += 1
+	local n = math.random(2, 4)
+	dynHost:CreateLabel({ Text = string.format("Rebuild #%d — generated %d toggles", rebuildCount, n) })
+	for i = 1, n do
+		local default = math.random() > 0.5
+		dynHost:CreateToggle({                         -- prechecked via Default
+			Name = "Auto module " .. i,
+			Description = default and "starts ON" or "starts OFF",
+			Default = default,
+			Callback = function(v) print(string.format("[Added] module %d → %s", i, tostring(v))) end,
+		})
+	end
+	print("[Added] section now holds", #dynHost:GetElements(), "controls") -- GetElements
+end
+rebuildDynamic()
+AddedRebuild:CreateButton({
+	Name = "Rebuild dynamic controls",
+	Callback = rebuildDynamic,
+})
+
+--═══════════════════════════ 9 · Reactive state (standalone) ═════════════
+local counter = Nectar.State.new(0)
+counter:Observe(function(v) print("[State] counter →", v) end)
+counter:Set(1)
+counter:Set(2)
+local doubled = Nectar.State.Computed({ counter }, function() return counter:Get() * 2 end)
+print("[State] computed doubled =", doubled:Get())
+
+print("RightShift toggles the UI · watermark is bottom-right by default")
+
+Nectar:Notify({
+	Title = "Nectar ready",
+	Content = "All components loaded. Watch the console for callback output.",
+	Type = "Success", Icon = "check", Duration = 5,
+})
