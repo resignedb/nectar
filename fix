@@ -1,0 +1,948 @@
+local Nectar = loadstring(game:HttpGet("https://raw.githubusercontent.com/resignedb/nectar/refs/heads/main/library.lua"))()
+
+-- Brand accent (Mango red) as a custom theme, inheriting everything else
+-- from Dark. Showcases Nectar:AddTheme + SetTheme.
+Nectar:AddTheme("Mango", {
+    Accent     = Color3.fromRGB(255, 42, 74),
+    AccentSoft = Color3.fromRGB(58, 20, 27),
+    AccentText = Color3.fromRGB(250, 248, 249),
+})
+Nectar:SetTheme("Mango")
+
+local Window = Nectar:CreateWindow({
+    Title     = "Mango",
+    Subtitle  = "mango.onl · v1.5",
+    Size      = UDim2.fromOffset(680, 470),
+    ToggleKey = Enum.KeyCode.RightShift,
+    Watermark = {
+        Enabled  = true,
+        Title    = "Mango",
+        Mode     = "watermark",
+        Location = "BottomRight",
+        Info     = "user, fps, ping",
+        Interval = 1,
+    },
+})
+
+local Players          = game:GetService("Players")
+local player           = Players.LocalPlayer
+local Workspace        = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local StarterGui       = game:GetService("StarterGui")
+local RunService       = game:GetService("RunService")
+local HttpService      = game:GetService("HttpService")
+
+local mouse          = player:GetMouse()
+local vehiclesFolder = Workspace:WaitForChild("Vehicles")
+local playerGui      = player:WaitForChild("PlayerGui")
+
+local playerData   = player:WaitForChild("PlayerData", 10)
+local statusFolder = playerData and playerData:WaitForChild("Status", 10)
+local moneyObject  = statusFolder and statusFolder:WaitForChild("Money", 10)
+
+-- ============================================================================
+-- GLOBAL STATE
+-- ============================================================================
+getgenv().AutobuyEnabled    = false
+getgenv().SpawnChanceLimit  = 100
+getgenv().EspEnabled        = false
+getgenv().SelectedLocation  = "Junkyard"
+getgenv().VehicleFlyEnabled = false
+getgenv().VehicleFlySpeed   = 50
+
+local currentTimerValue = 0
+local carsBoughtCount   = 0
+local liveParsedWallet  = 0
+local notifiedVehicles  = {}
+local AlertSoundID      = 1
+local SoundVolume       = 1
+
+local liveCarStatuses = {}
+for i = 1, 9 do liveCarStatuses[i] = { Text = "[Empty Slot]", Instance = nil } end
+
+local locations = {
+    ["Junkyard"] = Vector3.new(-1659.89, 4.25, -343.20),
+    ["Garage"]   = Vector3.new(-1914.75, 4.28, -562.92),
+    ["Shop"]     = Vector3.new(-1466.5,  5.2,  -536.0),
+    ["Bank"]     = Vector3.new(-1455.0,  5.5,  -750.5),
+    ["Sell/Auc"] = Vector3.new(-1910,    3.9,  -815.2),
+    ["Repair"]   = Vector3.new(-1087.20, 4.53, -339.91),
+}
+
+-- Webhook state
+local webhookURL          = ""
+local webhookAlertEnabled = false
+local webhookPingEveryone = false
+local webhookBuyAlert     = false
+local webhookChanceLimit  = 100
+local webhookNotified     = {}
+
+-- ============================================================================
+-- HELPERS
+-- ============================================================================
+-- Nectar notifications use a table signature; wrap it so the rest of the file
+-- reads like the old Window:Notify(title, text) calls.
+local function notify(title, content, kind, duration)
+    Nectar:Notify({
+        Title    = title,
+        Content  = content,
+        Type     = kind or "Info",
+        Duration = duration or 4,
+    })
+end
+
+local function sendRobloxNotification(title, text, duration)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = duration or 5 })
+    end)
+end
+
+local function playAlertSound()
+    local sound = Instance.new("Sound")
+    sound.Parent  = playerGui
+    sound.SoundId = "rbxassetid://" .. AlertSoundID
+    sound.Volume  = SoundVolume
+    sound:Play()
+    task.delay(5, function() sound:Destroy() end)
+end
+
+local function findMoney()
+    if not moneyObject then
+        local pd   = player:FindFirstChild("PlayerData")
+        local stat = pd and pd:FindFirstChild("Status")
+        moneyObject = stat and stat:FindFirstChild("Money")
+    end
+    if moneyObject then
+        local parsed = tonumber(tostring(moneyObject.Value):gsub("[^%d%.]", ""))
+        if parsed then liveParsedWallet = parsed return parsed end
+    end
+    return liveParsedWallet or 0
+end
+
+local function getSecondPrice(carInstance)
+    local priceAttr = carInstance:GetAttribute("Price")
+    if not priceAttr then return nil end
+    if type(priceAttr) == "table" then
+        return tonumber(priceAttr.Max or priceAttr.max)
+    end
+    local ok, res = pcall(function() return priceAttr.Max or priceAttr.max or priceAttr.Y end)
+    if ok and tonumber(res) then return tonumber(res) end
+    return tonumber(tostring(priceAttr):gsub("[^%d%.]", ""))
+end
+
+local function isRealCar(v)
+    if v:GetAttribute("ExclusivePrice") then return false end
+    local chance = tonumber(v:GetAttribute("SpawnChance"))
+    if not chance then return false end
+    local owner    = v:GetAttribute("Owner") or v:FindFirstChild("Owner")
+    local hasOwner = owner and tostring(owner) ~= "" and tostring(owner) ~= "0"
+    if chance <= 0 or hasOwner then return false end
+    return true
+end
+
+local function findPlayerCar()
+    for _, car in pairs(vehiclesFolder:GetChildren()) do
+        if tostring(car:GetAttribute("Owner")) == player.Name then return car end
+    end
+    return nil
+end
+
+local function teleportToCar(carInstance)
+    if not carInstance or not carInstance:IsA("Model") then return end
+    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        hrp.CFrame = CFrame.new(carInstance:GetPivot().Position + Vector3.new(0, 4, 6))
+        sendRobloxNotification("Teleport", "Teleported to " .. carInstance.Name, 2)
+    end
+end
+
+local function teleportCarOrPlayer(targetPos)
+    local character = player.Character
+    local humanoid  = character and character:FindFirstChildWhichIsA("Humanoid")
+    if humanoid and humanoid.SeatPart and humanoid.SeatPart:IsA("VehicleSeat") then
+        local seat  = humanoid.SeatPart
+        local model = seat:FindFirstAncestorOfClass("Model") or seat.Parent
+        if model then
+            model:PivotTo(CFrame.new(targetPos + Vector3.new(0, 3, 0)))
+        else
+            seat.AssemblyLinearVelocity  = Vector3.new(0, 0, 0)
+            seat.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            seat.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+        end
+    else
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        if hrp then hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0)) end
+    end
+end
+
+-- ============================================================================
+-- WEBHOOK
+-- ============================================================================
+local function sendWebhookRaw(body)
+    if webhookURL == "" then return end
+    task.spawn(function()
+        pcall(function()
+            local req = (syn and syn.request) or (http and http.request) or request
+            req({
+                Url     = webhookURL,
+                Method  = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body    = body,
+            })
+        end)
+    end)
+end
+
+local function sendWebhookEmbed(embedData)
+    sendWebhookRaw(HttpService:JSONEncode({
+        username = "Mango",
+        content  = webhookPingEveryone and "@everyone" or "",
+        embeds   = { embedData },
+    }))
+end
+
+local function sendCarAlert(carName, price, chance, timer)
+    if not webhookAlertEnabled then return end
+    sendWebhookEmbed({
+        title       = "Car Spotted on Lot",
+        color       = 0xFF2A4A,
+        description = "A car matching your webhook filters appeared!",
+        fields      = {
+            { name = "Car",          value = tostring(carName),           inline = true  },
+            { name = "Price",        value = "$" .. tostring(price),      inline = true  },
+            { name = "Spawn Chance", value = tostring(chance) .. "%",     inline = true  },
+            { name = "Lot Refresh",  value = tostring(timer) .. "s left", inline = false },
+        },
+        footer = { text = "mango.onl" },
+    })
+end
+
+local function sendBuyAlert(carName, price)
+    if not webhookBuyAlert then return end
+    sendWebhookEmbed({
+        title       = "Car Purchased",
+        color       = 0x44FF88,
+        description = "Autobuy sniped a car!",
+        fields      = {
+            { name = "Car",   value = tostring(carName),      inline = true },
+            { name = "Price", value = "$" .. tostring(price), inline = true },
+        },
+        footer = { text = "mango.onl" },
+    })
+end
+
+-- ============================================================================
+-- CAR LOT LOGIC
+-- ============================================================================
+local function updateLiveCarStatus()
+    local currentMoney = findMoney()
+    for i = 1, 9 do liveCarStatuses[i] = { Text = "[Empty Slot]", Instance = nil } end
+
+    local slotIndex = 1
+    for _, car in pairs(vehiclesFolder:GetChildren()) do
+        if slotIndex > 9 then break end
+        local owner    = car:GetAttribute("Owner") or car:FindFirstChild("Owner")
+        local hasOwner = owner and tostring(owner) ~= "" and tostring(owner) ~= "0"
+        local spawnChance = tonumber(car:GetAttribute("SpawnChance"))
+
+        if not hasOwner and spawnChance then
+            local carName  = car.Name
+            local maxPrice = getSecondPrice(car) or 0
+            local reason
+            if car:GetAttribute("ExclusivePrice") then
+                reason = "Exclusive"
+            elseif not getgenv().AutobuyEnabled then
+                reason = "Sniper Off"
+            elseif spawnChance > getgenv().SpawnChanceLimit then
+                reason = "Chance Skip"
+            elseif currentMoney < maxPrice then
+                reason = "No Funds"
+            else
+                reason = "BUYING!"
+            end
+            liveCarStatuses[slotIndex] = {
+                Text     = carName .. "  $" .. tostring(maxPrice) .. "  [" .. reason .. "]",
+                Instance = car,
+            }
+            slotIndex = slotIndex + 1
+
+            if webhookAlertEnabled and not webhookNotified[car]
+                and not car:GetAttribute("ExclusivePrice")
+                and spawnChance <= webhookChanceLimit then
+                webhookNotified[car] = true
+                sendCarAlert(carName, maxPrice, spawnChance, currentTimerValue)
+            end
+        end
+    end
+end
+
+local function applyESP()
+    for _, v in pairs(vehiclesFolder:GetChildren()) do
+        if not getgenv().EspEnabled or not isRealCar(v) then
+            if v:FindFirstChild("ESPHighlight") then v.ESPHighlight:Destroy() end
+            if v:FindFirstChild("ESPGui")       then v.ESPGui:Destroy()       end
+            continue
+        end
+        local chance = tonumber(v:GetAttribute("SpawnChance"))
+        if chance and chance > 0 and chance <= 1 and not notifiedVehicles[v] then
+            playAlertSound()
+            sendRobloxNotification("Rare Car Spawned", "Chance: " .. tostring(chance) .. "%", 5)
+            notifiedVehicles[v] = true
+        end
+        local hl = v:FindFirstChild("ESPHighlight") or Instance.new("Highlight", v)
+        hl.Name                = "ESPHighlight"
+        hl.FillColor           = (chance and chance <= 1) and Color3.new(1,0,0) or Color3.new(1,1,1)
+        hl.FillTransparency    = (chance and chance <= 1) and 0.2 or 1
+        hl.OutlineTransparency = 0.7
+        local bill = v:FindFirstChild("ESPGui") or Instance.new("BillboardGui", v)
+        bill.Name        = "ESPGui"
+        bill.AlwaysOnTop = true
+        bill.Size        = UDim2.new(0, 100, 0, 40)
+        bill.StudsOffset = Vector3.new(0, 6, 0)
+        local lab = bill:FindFirstChild("TextLabel") or Instance.new("TextLabel", bill)
+        lab.BackgroundTransparency = 1
+        lab.Size       = UDim2.new(1, 0, 1, 0)
+        lab.TextColor3 = Color3.new(1, 1, 1)
+        lab.Font       = Enum.Font.GothamBold
+        lab.RichText   = true
+        local col = (chance and chance <= 1) and "rgb(255,0,0)" or "rgb(0,255,128)"
+        lab.Text  = "Body\n<font color='"..col.."'>" .. (chance or "?") .. "%</font>"
+    end
+end
+
+local function getRespawnTextLabel()
+    local map     = Workspace:FindFirstChild("Map")
+    local city    = map and map:FindFirstChild("FirstCity")
+    local junk    = city and city:FindFirstChild("Junkyard")
+    local respawn = junk and junk:FindFirstChild("JunkyardRespawn")
+    local screen  = respawn and respawn:FindFirstChild("Screen")
+    local sgui    = screen and screen:FindFirstChildWhichIsA("SurfaceGui")
+    return sgui and sgui:FindFirstChildWhichIsA("TextLabel")
+end
+
+-- ============================================================================
+-- AUTOBUY
+-- ============================================================================
+local function processAutobuy()
+    if not getgenv().AutobuyEnabled then return end
+    local currentMoney = findMoney()
+    local validCars    = {}
+    for _, car in pairs(vehiclesFolder:GetChildren()) do
+        if isRealCar(car) and not car:GetAttribute("Owner") then
+            local spawnChance = tonumber(car:GetAttribute("SpawnChance")) or 100
+            if spawnChance <= getgenv().SpawnChanceLimit then
+                local maxPrice = getSecondPrice(car)
+                if maxPrice and currentMoney >= maxPrice then
+                    table.insert(validCars, { Instance = car, Chance = spawnChance, Price = maxPrice })
+                end
+            end
+        end
+    end
+    table.sort(validCars, function(a, b) return a.Chance < b.Chance end)
+    for _, carData in ipairs(validCars) do
+        local car = carData.Instance
+        local cd  = car:FindFirstChildWhichIsA("ClickDetector", true) or car:FindFirstChild("ClickDetector")
+        if cd then
+            local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and car:IsA("Model") then
+                hrp.CFrame = CFrame.new(car:GetPivot().Position + Vector3.new(0, 4, 2))
+            end
+            for _ = 1, 5 do
+                fireclickdetector(cd, 1)
+                fireclickdetector(cd, 0)
+            end
+            task.spawn(function()
+                local hud       = playerGui:WaitForChild("HUD", 4)
+                local frames    = hud and hud:WaitForChild("Frames", 4)
+                local confFrame = frames and frames:WaitForChild("Confirmation", 4)
+                local confBtn   = confFrame and confFrame:WaitForChild("Confirm", 4)
+                if confFrame and confBtn then
+                    local attempts = 0
+                    while confFrame.Visible and attempts < 40 do
+                        attempts = attempts + 1
+                        for _, sig in pairs(getconnections(confBtn.Activated))         do sig:Fire() end
+                        for _, sig in pairs(getconnections(confBtn.MouseButton1Click)) do sig:Fire() end
+                        pcall(function()
+                            local ap  = confBtn.AbsolutePosition
+                            local as_ = confBtn.AbsoluteSize
+                            local cx  = ap.X + as_.X / 2
+                            local cy  = ap.Y + as_.Y / 2 + 36
+                            local vim = game:GetService("VirtualInputManager")
+                            vim:SendMouseButtonEvent(cx, cy, 0, true,  game, 0)
+                            vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+                        end)
+                        task.wait(0.05)
+                    end
+                    if not confFrame.Visible and attempts < 40 then
+                        carsBoughtCount = carsBoughtCount + 1
+                        sendBuyAlert(car.Name, carData.Price)
+                    end
+                end
+            end)
+            break
+        end
+    end
+end
+
+-- ============================================================================
+-- VEHICLE FLY
+-- ============================================================================
+local bv, bg
+RunService.RenderStepped:Connect(function()
+    local character = player.Character
+    local humanoid  = character and character:FindFirstChildWhichIsA("Humanoid")
+    if getgenv().VehicleFlyEnabled and humanoid and humanoid.SeatPart and humanoid.SeatPart:IsA("VehicleSeat") then
+        local seat = humanoid.SeatPart
+        if not bv or bv.Parent ~= seat then
+            bv = Instance.new("BodyVelocity")
+            bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+            bv.Parent   = seat
+        end
+        if not bg or bg.Parent ~= seat then
+            bg = Instance.new("BodyGyro")
+            bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+            bg.P         = 9e4
+            bg.Parent    = seat
+        end
+        local cam   = Workspace.CurrentCamera
+        local speed = getgenv().VehicleFlySpeed
+        local F = UserInputService:IsKeyDown(Enum.KeyCode.W)         and  1 or 0
+        local B = UserInputService:IsKeyDown(Enum.KeyCode.S)         and -1 or 0
+        local L = UserInputService:IsKeyDown(Enum.KeyCode.A)         and -1 or 0
+        local R = UserInputService:IsKeyDown(Enum.KeyCode.D)         and  1 or 0
+        local Q = (UserInputService:IsKeyDown(Enum.KeyCode.E) or UserInputService:IsKeyDown(Enum.KeyCode.Space))     and  2 or 0
+        local E = (UserInputService:IsKeyDown(Enum.KeyCode.Q) or UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)) and -2 or 0
+        if (L+R) ~= 0 or (F+B) ~= 0 or (Q+E) ~= 0 then
+            bv.Velocity = ((cam.CFrame.LookVector * (F+B)) + ((cam.CFrame * CFrame.new(L+R, (F+B+Q+E)*0.2, 0).Position) - cam.CFrame.Position)) * speed
+        else
+            bv.Velocity = Vector3.new(0, 0, 0)
+        end
+        local _, yaw, _ = cam.CFrame:ToEulerAnglesYXZ()
+        bg.CFrame = CFrame.fromEulerAnglesYXZ(0, yaw, 0)
+    else
+        if bv then bv:Destroy() bv = nil end
+        if bg then bg:Destroy() bg = nil end
+    end
+end)
+
+-- ============================================================================
+-- BUILD UI
+-- ============================================================================
+
+-- ─────────────────────────────── STATS ───────────────────────────────
+local tabStats = Window:CreateTab({ Name = "Stats", Icon = "grid" })
+
+local secOverview = tabStats:CreateSection("Overview")
+local timerLabel  = secOverview:CreateLabel({ Text = "Respawn Timer  :  0s" })
+local walletLabel = secOverview:CreateLabel({ Text = "Wallet  :  $0" })
+local countLabel  = secOverview:CreateLabel({ Text = "Cars Bought  :  0" })
+local perfLabel   = secOverview:CreateLabel({ Text = "FPS  :  –    Ping  :  –    Players  :  –", Muted = true })
+
+local secLot = tabStats:CreateSection("Live Car Lot")
+local slotLabels = {}
+for i = 1, 9 do
+    slotLabels[i] = secLot:CreateLabel({ Text = "[" .. i .. "]  Scanning..." })
+end
+
+local secLotActions = tabStats:CreateSection("Lot Actions")
+local slotNames = {}
+for i = 1, 9 do slotNames[i] = "Slot " .. i end
+local selectedSlot = 1
+secLotActions:CreateDropdown({
+    Name = "Select Slot", Values = slotNames, Default = "Slot 1", Flag = "stats_slot",
+    Callback = function(val) selectedSlot = tonumber(tostring(val):match("%d+")) or 1 end,
+})
+secLotActions:CreateButton({
+    Name = "Teleport to Selected Slot", Description = "Warp to the car in the chosen lot slot",
+    Callback = function()
+        local entry = liveCarStatuses[selectedSlot]
+        if entry and entry.Instance then
+            teleportToCar(entry.Instance)
+        else
+            notify("Stats", "Slot " .. selectedSlot .. " is empty.", "Warning")
+        end
+    end,
+})
+
+-- Live refresh loop for the Stats tab (labels are :Set method calls in Nectar)
+coroutine.wrap(function()
+    while task.wait(0.5) do
+        pcall(function()
+            timerLabel:Set("Respawn Timer  :  " .. tostring(currentTimerValue) .. "s")
+            walletLabel:Set("Wallet  :  $"      .. tostring(liveParsedWallet))
+            countLabel:Set("Cars Bought  :  "   .. tostring(carsBoughtCount))
+            perfLabel:Set(string.format("FPS  :  %d    Ping  :  %dms    Players  :  %d",
+                Nectar.Info.GetFPS(), Nectar.Info.GetPing(), Nectar.Info.GetPlayerCount()))
+            for i = 1, 9 do
+                if slotLabels[i] and liveCarStatuses[i] then
+                    slotLabels[i]:Set("[" .. i .. "]  " .. tostring(liveCarStatuses[i].Text))
+                end
+            end
+        end)
+    end
+end)()
+
+-- ─────────────────────────────── SNIPER ──────────────────────────────
+local tabSniper = Window:CreateTab({ Name = "Sniper", Icon = "bolt" })
+
+local secAutobuy = tabSniper:CreateSection("Autobuy")
+secAutobuy:CreateToggle({
+    Name = "Enable Sniper", Description = "Automatically buy cars matching your filters",
+    Default = false, Flag = "sniper_enabled",
+    Callback = function(state)
+        getgenv().AutobuyEnabled = state
+        notify("Sniper", "Autobuy " .. (state and "enabled" or "disabled"), state and "Success" or "Info")
+    end,
+})
+
+local secFilters = tabSniper:CreateSection("Filters")
+secFilters:CreateSlider({
+    Name = "Max Spawn Chance", Min = 0, Max = 100, Step = 1, Default = 100, Suffix = "%",
+    Flag = "sniper_chance",
+    Callback = function(v) getgenv().SpawnChanceLimit = v end,
+})
+
+-- ─────────────────────────────── TELEPORT ────────────────────────────
+local tabTP = Window:CreateTab({ Name = "Teleport", Icon = "home" })
+
+local secLocs = tabTP:CreateSection("Locations")
+local locNames = {}
+for name in pairs(locations) do table.insert(locNames, name) end
+table.sort(locNames)
+secLocs:CreateDropdown({
+    Name = "Select Location", Values = locNames, Default = locNames[1], Flag = "tp_location",
+    Callback = function(val) getgenv().SelectedLocation = val end,
+})
+secLocs:CreateButton({
+    Name = "Teleport to Location", Description = "Warp to the selected map location",
+    Callback = function()
+        local pos = locations[getgenv().SelectedLocation]
+        if pos then
+            teleportCarOrPlayer(pos)
+            notify("Teleport", "Arrived at " .. getgenv().SelectedLocation, "Success")
+        end
+    end,
+})
+
+local secVeh = tabTP:CreateSection("Vehicle")
+secVeh:CreateButton({
+    Name = "Teleport to My Car", Description = "Warp to your owned vehicle",
+    Callback = function()
+        local myCar = findPlayerCar()
+        if myCar then teleportToCar(myCar)
+        else notify("Teleport", "Could not find your car.", "Warning") end
+    end,
+})
+secVeh:CreateToggle({
+    Name = "Enable Vehicle Fly", Description = "Fly your vehicle with WASD + E/Q",
+    Default = false, Flag = "fly_enabled",
+    Callback = function(state)
+        getgenv().VehicleFlyEnabled = state
+        notify("Vehicle Fly", state and "Enabled — WASD + E/Q" or "Disabled")
+    end,
+})
+secVeh:CreateSlider({
+    Name = "Fly Speed", Min = 10, Max = 300, Step = 5, Default = 50, Suffix = " sps",
+    Flag = "fly_speed",
+    Callback = function(v) getgenv().VehicleFlySpeed = v end,
+})
+
+local secTPInfo = tabTP:CreateSection("Info")
+secTPInfo:CreateParagraph({
+    Title = "Click Teleport",
+    Content = "Hold <b>Left Ctrl</b> and click anywhere to teleport yourself (or your vehicle) to that spot.",
+})
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.LeftControl then
+        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then teleportCarOrPlayer(mouse.Hit.Position) end
+    end
+end)
+
+-- ─────────────────────────────── VISUALS ─────────────────────────────
+local tabVisuals = Window:CreateTab({ Name = "Visuals", Icon = "eye" })
+
+local secESP = tabVisuals:CreateSection("Car ESP")
+secESP:CreateToggle({
+    Name = "Enable Car ESP", Description = "Highlight lot cars with outlines and labels",
+    Default = false, Flag = "esp_enabled",
+    Callback = function(state) getgenv().EspEnabled = state end,
+})
+secESP:CreateParagraph({
+    Title = "Legend",
+    Content = "Rare cars (≤1% spawn chance) glow <font color='rgb(255,80,80)'>red</font>; everything else glows <font color='rgb(80,255,150)'>green</font>.",
+})
+
+-- ─────────────────────────────── PERF MODS ───────────────────────────
+local tabPerf = Window:CreateTab({ Name = "Perf Mods", Icon = "sliders" })
+
+local secCar  = tabPerf:CreateSection("Current Car")
+local carOwnerLbl = secCar:CreateLabel({ Text = "Owner  :  Scanning..." })
+local carModelLbl = secCar:CreateLabel({ Text = "Model  :  Scanning..." })
+
+-- This section is rebuilt from scratch (secTune:Clear()) whenever you enter a
+-- different car, and repopulated from that car's A-Chassis TuneChanges folder.
+local secTune = tabPerf:CreateSection("A-Chassis Tune")
+
+local lastTuneFolder    = nil
+local tuneNumberHandles = {}   -- { handle = <NumberInput>, val = <NumberValue> }
+local tuneBoolHandles   = {}   -- { handle = <Toggle>,      val = <BoolValue>   }
+
+local function getTuneChanges(carInstance)
+    local chassisScript = carInstance:FindFirstChild("A-Chassis Tune")
+    if not chassisScript then return nil end
+    local config = chassisScript:FindFirstChild("Configuration") or chassisScript:FindFirstChild("TuneChanges")
+    if config and config.Name ~= "TuneChanges" then
+        return config:FindFirstChild("TuneChanges")
+    end
+    return config
+end
+
+local function buildTuneControls(tuneFolder)
+    secTune:Clear()               -- ADDED library feature: wipe old controls cleanly
+    tuneNumberHandles = {}
+    tuneBoolHandles   = {}
+
+    local children = tuneFolder:GetChildren()
+    table.sort(children, function(a, b) return a.Name < b.Name end)
+
+    local built = 0
+    for _, val in ipairs(children) do
+        local cn = val.ClassName
+        if cn == "BoolValue" then
+            local boundVal = val
+            -- Prechecked: Default = the value's live state.
+            local h = secTune:CreateToggle({
+                Name = boundVal.Name, Default = boundVal.Value == true,
+                Callback = function(state) pcall(function() boundVal.Value = state end) end,
+            })
+            table.insert(tuneBoolHandles, { handle = h, val = boundVal })
+            built += 1
+        elseif cn == "NumberValue" or cn == "IntValue" then
+            local boundVal = val
+            local h = secTune:CreateNumberInput({
+                Name = boundVal.Name, Default = boundVal.Value, Step = 1,
+                Callback = function(n) pcall(function() boundVal.Value = n end) end,
+            })
+            -- ADDED library feature: the description line becomes a live readout
+            -- of the value's current in-game number.
+            h:SetDescription("current: " .. tostring(boundVal.Value))
+            table.insert(tuneNumberHandles, { handle = h, val = boundVal })
+            built += 1
+        end
+    end
+
+    if built == 0 then
+        secTune:CreateLabel({ Text = "This car exposes no tunable A-Chassis values.", Muted = true })
+    end
+end
+
+task.spawn(function()
+    while task.wait(2) do
+        pcall(function()
+            local car = findPlayerCar()
+            if car then
+                carOwnerLbl:Set("Owner  :  " .. tostring(car:GetAttribute("Owner") or "Unknown"))
+                carModelLbl:Set("Model  :  " .. tostring(car:GetAttribute("Model")  or car.Name))
+
+                local tf = getTuneChanges(car)
+                if tf and tf ~= lastTuneFolder then
+                    lastTuneFolder = tf
+                    buildTuneControls(tf)
+                end
+
+                -- live-sync: number descriptions + toggle states track the game
+                for _, e in ipairs(tuneNumberHandles) do
+                    pcall(function() e.handle:SetDescription("current: " .. tostring(e.val.Value)) end)
+                end
+                for _, e in ipairs(tuneBoolHandles) do
+                    pcall(function() e.handle:Set(e.val.Value == true, true) end)
+                end
+            else
+                carOwnerLbl:Set("Owner  :  Not Found")
+                carModelLbl:Set("Model  :  Not Found")
+                if lastTuneFolder ~= nil then
+                    lastTuneFolder = nil
+                    secTune:Clear()
+                    tuneNumberHandles, tuneBoolHandles = {}, {}
+                    secTune:CreateLabel({ Text = "Enter a car to load its tune.", Muted = true })
+                end
+            end
+        end)
+    end
+end)
+
+-- ─────────────────────────────── PARTS ───────────────────────────────
+local moveableParts = Workspace:WaitForChild("MoveableParts", 10)
+local tabParts = Window:CreateTab({ Name = "Parts", Icon = "folder" })
+
+local myDroppedParts      = {}
+local selectedDroppedPart = nil
+
+local function bringPartToPlayer(partInstance)
+    if not partInstance then return end
+    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local targetCF = hrp.CFrame * CFrame.new(0, 0, -5)
+    pcall(function()
+        if partInstance:IsA("Model") then partInstance:PivotTo(targetCF)
+        else partInstance.CFrame = targetCF end
+    end)
+end
+
+local secMyParts = tabParts:CreateSection("My Dropped Parts")
+local droppedCountLbl = secMyParts:CreateLabel({ Text = "Parts Found  :  Scanning..." })
+
+-- Built once, then refreshed in-place with the Dropdown:Refresh API.
+local partsDropdown = secMyParts:CreateDropdown({
+    Name = "Select Part", Values = {}, Flag = "parts_select",
+    Callback = function(chosen)
+        for _, pd in ipairs(myDroppedParts) do
+            if pd.Name == chosen then selectedDroppedPart = pd.Instance break end
+        end
+    end,
+})
+
+local function refreshDroppedParts()
+    myDroppedParts      = {}
+    selectedDroppedPart = nil
+    if not moveableParts then
+        droppedCountLbl:Set("MoveableParts folder not found")
+        return
+    end
+    for _, part in pairs(moveableParts:GetChildren()) do
+        if tostring(part:GetAttribute("Owner")) == player.Name then
+            table.insert(myDroppedParts, { Name = part.Name, Instance = part })
+        end
+    end
+    droppedCountLbl:Set("Parts Found  :  " .. #myDroppedParts)
+    local names = {}
+    for _, pd in ipairs(myDroppedParts) do table.insert(names, pd.Name) end
+    partsDropdown:Refresh(names, false)   -- rebuild dropdown values in place
+end
+
+secMyParts:CreateButton({
+    Name = "Refresh Parts List", Description = "Scan MoveableParts for your dropped parts",
+    Callback = function()
+        refreshDroppedParts()
+        notify("Dropped Parts", "Found " .. #myDroppedParts .. " part(s).")
+    end,
+})
+
+local secPartActions = tabParts:CreateSection("Actions")
+secPartActions:CreateButton({
+    Name = "Bring Selected Part", Description = "Teleport the selected part to you",
+    Callback = function()
+        if selectedDroppedPart then
+            bringPartToPlayer(selectedDroppedPart)
+            notify("Dropped Parts", "Brought: " .. selectedDroppedPart.Name, "Success")
+        else
+            notify("Dropped Parts", "No part selected.", "Warning")
+        end
+    end,
+})
+secPartActions:CreateButton({
+    Name = "Bring All My Parts", Description = "Teleport every dropped part you own to you",
+    Callback = function()
+        local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local count = 0
+        for _, pd in ipairs(myDroppedParts) do
+            pcall(function()
+                local targetCF = hrp.CFrame * CFrame.new(math.random(-4, 4), 0, math.random(-4, 4))
+                if pd.Instance:IsA("Model") then pd.Instance:PivotTo(targetCF)
+                else pd.Instance.CFrame = targetCF end
+                count += 1
+            end)
+        end
+        notify("Dropped Parts", "Brought " .. count .. " part(s).", "Success")
+    end,
+})
+secPartActions:CreateToggle({
+    Name = "NoCleanup (Selected / All)", Description = "Prevent selected or all parts from being cleaned up",
+    Default = false, Flag = "parts_nocleanup",
+    Callback = function(state)
+        local targets = selectedDroppedPart and { selectedDroppedPart } or {}
+        if #targets == 0 then for _, pd in ipairs(myDroppedParts) do table.insert(targets, pd.Instance) end end
+        for _, inst in ipairs(targets) do pcall(function() inst:SetAttribute("NoCleanup", state) end) end
+    end,
+})
+secPartActions:CreateButton({
+    Name = "Set Wear = 0 (Selected / All)", Description = "Reset wear on selected or all parts to zero",
+    Callback = function()
+        local targets = selectedDroppedPart and { selectedDroppedPart } or {}
+        if #targets == 0 then for _, pd in ipairs(myDroppedParts) do table.insert(targets, pd.Instance) end end
+        local count = 0
+        for _, inst in ipairs(targets) do
+            pcall(function() inst:SetAttribute("Wear", 0) count += 1 end)
+        end
+        notify("Dropped Parts", "Set Wear=0 on " .. count .. " part(s).", "Success")
+    end,
+})
+
+task.spawn(refreshDroppedParts)
+
+-- ─────────────────────────────── SHOP ────────────────────────────────
+local partsStore = Workspace:WaitForChild("PartsStore", 10)
+local spareParts = partsStore and partsStore:WaitForChild("SpareParts", 10)
+local partsRoot  = spareParts and spareParts:WaitForChild("Parts", 10)
+
+local tabShop = Window:CreateTab({ Name = "Shop", Icon = "list" })
+local selectedShopPart = nil
+
+if partsRoot then
+    local secBrowse = tabShop:CreateSection("Spare Parts")
+    local categories = partsRoot:GetChildren()
+    table.sort(categories, function(a, b) return a.Name < b.Name end)
+
+    for _, categoryFolder in ipairs(categories) do
+        local partModels = categoryFolder:GetChildren()
+        table.sort(partModels, function(a, b) return a.Name < b.Name end)
+        local modelNames = {}
+        for _, m in ipairs(partModels) do table.insert(modelNames, m.Name) end
+
+        if #modelNames > 0 then
+            local boundFolder = categoryFolder
+            secBrowse:CreateDropdown({
+                Name = boundFolder.Name, Values = modelNames, Flag = "shop_" .. boundFolder.Name,
+                Callback = function(chosen)
+                    for _, m in ipairs(boundFolder:GetChildren()) do
+                        if m.Name == chosen then selectedShopPart = m break end
+                    end
+                end,
+            })
+        end
+    end
+
+    local secBuy = tabShop:CreateSection("Purchase")
+    secBuy:CreateButton({
+        Name = "Buy Selected Part", Description = "Purchase the currently selected part",
+        Callback = function()
+            if not selectedShopPart then notify("Shop", "No part selected.", "Warning") return end
+            local partName = selectedShopPart.Name
+            local cd = selectedShopPart:FindFirstChildWhichIsA("ClickDetector", true)
+            if cd then
+                fireclickdetector(cd, 0)
+                notify("Shop", "Bought: " .. partName, "Success")
+                selectedShopPart = nil
+            else
+                notify("Shop", "No ClickDetector on that part.", "Error")
+            end
+        end,
+    })
+else
+    local secShop = tabShop:CreateSection("Spare Parts Shop")
+    secShop:CreateLabel({ Text = "PartsStore folder not found in Workspace.", Muted = true })
+end
+
+-- ─────────────────────────────── WEBHOOK ─────────────────────────────
+local tabWebhook = Window:CreateTab({ Name = "Webhook", Icon = "terminal" })
+
+local secHook = tabWebhook:CreateSection("Setup")
+secHook:CreateTextbox({
+    Name = "Webhook URL", Placeholder = "https://discord.com/api/webhooks/...",
+    Flag = "webhook_url", Callback = function(text) webhookURL = text end,
+})
+secHook:CreateButton({
+    Name = "Test Webhook", Description = "Send a test ping to verify your URL works",
+    Callback = function()
+        if webhookURL == "" then notify("Webhook", "Enter a URL first.", "Warning") return end
+        sendWebhookRaw(HttpService:JSONEncode({
+            username = "Mango",
+            content  = "Test message from Mango!",
+        }))
+        notify("Webhook", "Test message sent!", "Success")
+    end,
+})
+
+local secAlerts = tabWebhook:CreateSection("Alerts")
+secAlerts:CreateToggle({
+    Name = "Car Spot Alerts", Description = "Ping when a matching car appears on the lot",
+    Default = false, Flag = "webhook_alert", Callback = function(s) webhookAlertEnabled = s end,
+})
+secAlerts:CreateToggle({
+    Name = "Buy Alerts", Description = "Ping when autobuy purchases a car",
+    Default = false, Flag = "webhook_buy", Callback = function(s) webhookBuyAlert = s end,
+})
+secAlerts:CreateToggle({
+    Name = "Ping @everyone", Description = "Prepend @everyone to all webhook messages",
+    Default = false, Flag = "webhook_ping", Callback = function(s) webhookPingEveryone = s end,
+})
+
+local secHookFilters = tabWebhook:CreateSection("Alert Filters")
+secHookFilters:CreateSlider({
+    Name = "Alert Max Spawn Chance", Min = 0, Max = 100, Step = 1, Default = 100, Suffix = "%",
+    Flag = "webhook_chance", Callback = function(v) webhookChanceLimit = v end,
+})
+
+-- ─────────────────────────────── SETTINGS ────────────────────────────
+local tabSettings = Window:CreateTab({ Name = "Settings", Icon = "settings" })
+
+local secUI = tabSettings:CreateSection("Interface")
+secUI:CreateDropdown({
+    Name = "Theme", Values = { "Mango", "Dark", "Light", "Amoled" }, Default = "Mango",
+    Callback = function(t) Nectar:SetTheme(t) end,
+})
+secUI:CreateKeybind({
+    Name = "UI Toggle Key", Default = Enum.KeyCode.RightShift,
+    ChangedCallback = function(key)
+        if key then
+            Window:SetToggleKey(key)
+            notify("Interface", "UI toggle key set to " .. key.Name)
+        end
+    end,
+})
+secUI:CreateButton({
+    Name = "Minimize Window", Description = "Collapse the window to its title bar",
+    Callback = function() Window:SetMinimized(true) end,
+})
+
+local secConfig = tabSettings:CreateSection("Configuration")
+secConfig:CreateConfigManager({ Title = "Saved configs", Default = "mango" })
+
+-- ─────────────────────────────── CREDITS ─────────────────────────────
+local tabCredits = Window:CreateTab({ Name = "Credits", Icon = "user" })
+
+local secCredits = tabCredits:CreateSection("Mango")
+secCredits:CreateLabel({ Text = "Site  :  mango.onl" })
+secCredits:CreateLabel({ Text = "Version    :  v1.5  ·  Nectar UI" })
+secCredits:CreateButton({
+    Name = "Join Discord", Description = "Copy the Discord invite link to your clipboard",
+    Callback = function()
+        setclipboard("https://discord.gg/ZBJ2ehQKSK")
+        notify("Discord", "Link copied to clipboard!", "Success")
+    end,
+})
+
+-- ============================================================================
+-- BACKGROUND THREADS (started after UI is built)
+-- ============================================================================
+task.spawn(function()
+    local lastTimer = 0
+    while task.wait(1) do
+        local lbl = getRespawnTextLabel()
+        if lbl then
+            currentTimerValue = tonumber(lbl.Text:match("%d+")) or 0
+        else
+            currentTimerValue = 0
+        end
+        if currentTimerValue == 1 and lastTimer ~= 1 then
+            sendRobloxNotification("Server Alert", "Lot respawns in 1 second!", 4)
+            webhookNotified = {}
+        end
+        lastTimer = currentTimerValue
+        pcall(applyESP)
+        pcall(updateLiveCarStatus)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(15)
+        if getgenv().AutobuyEnabled then pcall(processAutobuy) end
+    end
+end)
+
+notify("Mango", "Loaded! v1.5 — Right Shift to toggle.", "Success", 5)
