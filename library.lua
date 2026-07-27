@@ -1,3 +1,23 @@
+--!nonstrict
+--[=[
+	NECTAR UI ─ a commercial-grade interface framework for Roblox
+	============================================================
+	Design language : floating surfaces · layered depth · soft shadows · restrained motion
+	Architecture    : Signal → State → Motion → Theme → Components → Chrome (Window/Tab/Section)
+
+	WHY one file?  The framework is deliberately shipped as a single module so it can be
+	loadstring'd, required, or bundled without a loader graph. Internally it is still
+	organized as isolated "modules" (local tables) with explicit dependencies, so the
+	single-file constraint never leaks into the architecture.
+
+	Public entry:
+		local Nectar  = require(...Library)
+		local Window  = Nectar:CreateWindow({ Title = "…" })
+		local Tab     = Window:CreateTab({ Name = "Main", Icon = "home" })
+		local Section = Tab:CreateSection("Settings")
+		Section:CreateToggle({ Name = "…", Callback = print })
+]=]
+
 local TweenService      = game:GetService("TweenService")
 local UserInputService  = game:GetService("UserInputService")
 local RunService        = game:GetService("RunService")
